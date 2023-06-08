@@ -1,0 +1,12 @@
+{
+    "Belize": "BLZ",
+    "Colombia": "COL",
+    "Costa Rica": "CRI",
+    "Ecuador": "ECU",
+    "Guatemala": "GTM",
+    "Honduras": "HND",
+    "Mexico": "MEX",
+    "Nicaragua": "NIC",
+    "Panama": "PAN",
+    "El Salvador": "SLV"
+}
