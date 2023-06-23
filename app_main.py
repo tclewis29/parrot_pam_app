@@ -23,12 +23,11 @@ from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 from timezonefinder import TimezoneFinder
 import pytz
-from scipy.signal import spectrogram
 import pygame
 import requests
-import json
-import rasterio
-from rasterio import mask
+from GGM_recogniser import makePredictions
+from pathlib import Path
+import psutil
 
 matplotlib.use('TkAgg')
 
@@ -173,6 +172,64 @@ class ToplevelWindow(CTkToplevel):
         self.save_button = CTkButton(self, text="Save", command=self.save_settings)
         self.save_button.grid(row=8, column=4, padx=10, pady=10, columnspan = 2)
 
+    def get_countries(self):
+            print('Finding countries')
+
+            ##df = pd.read_csv(self.file_path)
+
+            #print(df.head(n = 10))
+
+            # Create transformer
+            #transformer = Transformer.from_crs(self.epsg_entry.get(), 'EPSG:4326')
+
+            # Transform the coordinates
+            #df['y'], df['x'] = transformer.transform(df['long'].values, df['lat'].values)
+            #
+            #print(df.head(n = 10))
+
+            # Calculate bounding box
+            #minx = df['x'].min()
+            #miny = df['y'].min()
+            #maxx = df['x'].max()
+           # maxy = df['y'].max()
+
+            # Overpass API expects bounding boxes in the form (miny, minx, maxy, maxx). 
+            # This is because Overpass API uses a (latitude, longitude) ordering, which is (y, x).
+            #overpass_bbox = (miny, minx, maxy, maxx) 
+            #print(overpass_bbox)  
+
+            # Use Overpass API to get country names that intersect the bounding box
+            #overpass_url = "http://overpass-api.de/api/interpreter"
+            #overpass_query = f"""
+           # [out:json];
+           # (
+           # relation["boundary"="administrative"]["admin_level"="2"]({miny},{minx},{maxy},{maxx});
+           # );
+           # out body;
+          #  >;
+           # out skel qt;
+           # """
+          #  response = requests.get(overpass_url, params={'data': overpass_query})
+
+          #  if response.status_code == 200:
+          #          # Successful request
+         #           data = response.json()
+         #   elif response.status_code == 400:
+         #           # Bad request
+         #           print("Bad Request: ", response.text)
+          #  else:
+          #          # Other error
+          #          print(f"HTTP {response.status_code}: ", response.text)
+##
+        #    self.controller.countries = set()
+         #   for element in data['elements']:
+        #            if element['type'] == 'relation':
+         #               for tag in element['tags']:
+         #                   if tag == 'name:en':
+         #                       self.controller.countries.add(element['tags'][tag])
+        #    
+         #   print('The project is working in', self.controller.countries)
+
     def allow_model_load(self, select_valued):
         if select_valued == "Yes":
             self.model_location_button.configure(state='normal')
@@ -246,12 +303,15 @@ class ToplevelWindow(CTkToplevel):
     def save_settings(self):
         print('Saving settings')
 
+        # get the countries the project is working in
+        # self.get_countries()
+
         # Read the EPSG codes from the .txt file and store them in a set
         with open("epsg_codes.txt", "r") as f:
             self.epsg_codes = {line.strip() for line in f}
 
         self.controller.EPSG_code = self.epsg_entry.get()
-        
+        print('Compiling settings')
         # Gather all the settings
         settings = {
             'meta_data': self.meta_data_textbox.get("1.0", "end-1c"),
@@ -259,9 +319,10 @@ class ToplevelWindow(CTkToplevel):
             'data_location': self.controller.data_location,
             'model': self.controller.model_selected,
             'date_convention': self.date_dropdown_textbox.get("1.0", "end-1c"),
-            'name_convention': self.naming_dropdown_textbox.get("1.0", "end-1c")
+            'name_convention': self.naming_dropdown_textbox.get("1.0", "end-1c"),
+            'countries': self.controller.countries
         }
-
+        print('Making new directory')
         # Get project name from the CTkEntry widget
         project_name = self.project_name.get().strip()
 
@@ -410,7 +471,7 @@ class Dashboard(CTkFrame):
         self.end_date_text = CTkTextbox(self.model_frame, wrap = "word", height=1)
         self.end_date_text.grid(row = 7, column = 1, padx=10, pady=(5, 5),sticky = "ew")
 
-        ### Metrics Frame ###
+        ### Performance Frame ###
         self.metric_frame= CTkScrollableFrame(self)
         self.metric_frame.grid(row=2, column=1, padx=(10, 0), pady=(10, 0), sticky="nsew")
         self.metric_frame.grid_rowconfigure(0, weight=0) 
@@ -517,10 +578,11 @@ class Dashboard(CTkFrame):
         # Create a dataframe to store the results
         metric_data = pd.DataFrame(columns=['species', 'precision', 'recall'])
         print('Created dataframe', metric_data)
+        
         # Loop over all the species in your data
-        for species in self.data_source['common_name'].unique():
+        for species in self.data_source[self.column_to_check].unique():
             print('Adding ', species, ' to dataframe')
-            filtered_df = self.data_source[self.data_source['common_name'] == species]
+            filtered_df = self.data_source[self.data_source[self.column_to_check] == species]
             
             count_values = filtered_df['ManVal'].value_counts()
             TP = count_values.get('correct', 0)   # Returns count of 'correct' if it exists, 0 otherwise
@@ -560,37 +622,52 @@ class Dashboard(CTkFrame):
         print('Load data source')
         self.file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
         self.data_source = pd.read_csv(f'{self.file_path}')
-        
-        self.unique_values = self.data_source['common_name'].unique().tolist()
+
+        self.column_to_check = 'common_name' if 'common_name' in self.data_source.columns else 'pred_class' if 'pred_class' in self.data_source.columns else None
+        self.unique_values = self.data_source[self.column_to_check].unique().tolist()
         self.species_dropdown.destroy()
         self.species_map_dropdown.destroy()
         self.text_dropdown.configure(state = "disabled")
 
-        self.species_var = StringVar(value=self.unique_values[0])
+        self.species_var = StringVar(value="Select Species")
         self.species_dropdown = CTkOptionMenu(self.metric_frame, values=self.unique_values, variable=self.species_var, command=self.show_metrics, dynamic_resizing = False)
         self.species_dropdown.grid(row=2, column=1, padx=10, pady=(5, 5), sticky="nsew")
         
-        self.species_plot_var = StringVar(value=self.unique_values[0])
+        self.species_plot_var = StringVar(value="Select Species")
         self.species_map_dropdown = CTkOptionMenu(self.plot_instructions, values=self.unique_values, variable=self.species_plot_var, dynamic_resizing = False)
         self.species_map_dropdown.grid(row=3, column=2, padx=(5, 5), pady=(5, 5), sticky="nsew")
-        self.show_metrics(self.species_var.get())
 
     def show_metrics(self, value):
         print('Species:', value)
+        
         self.precision_text.delete('1.0', 'end')
         self.recall_text.delete('1.0', 'end')
 
-        filtered_df = self.data_source[self.data_source['common_name'] == value]
-        
-        count_values = filtered_df['ManVal'].value_counts()
-
-        TP = count_values.get('correct', 0)   # Returns count of 'correct' if it exists, 0 otherwise
-        FP = count_values.get('incorrect', 0)   # Returns count of 'incorrect' if it exists, 0 otherwise
+        if self.data_source is not None:
+            print('Data is loaded')
+            filtered_df = self.data_source[self.data_source[self.column_to_check] == value]
+            print(filtered_df.head(n = 10))
+            if not filtered_df.empty and 'ManVal' in filtered_df:
+                count_values = filtered_df['ManVal'].value_counts()
+                TP = count_values.get('correct', 0)   # Returns count of 'correct' if it exists, 0 otherwise
+                FP = count_values.get('incorrect', 0)   # Returns count of 'incorrect' if it exists, 0 otherwise
+                print('TP =', TP, 'FP =', FP)
+            else:
+                print('ManVal is not present or dataframe is empty')
+                TP = 0
+                FP = 0
+        else:
+            print("Cannot find data")     
 
         if value in self.data_source.columns:
+            print(value, 'column exists')
             recall_check = self.data_source[value].value_counts()
-            FN = recall_check.get('incorrect', 0) # Returns count of 'incorrect' from target species column, 0 otherwise 
-            recall = TP / (FN + TP)   
+            FN = recall_check.get('correct', 0) # Returns count of 'correct' from target species column, 0 otherwise 
+            print('FN =', FN)
+            if FN + TP == 0:
+                recall = 0.0
+            else:
+                recall = TP / (FN + TP)   
         else:
             recall = "Please Validate negatives"
 
@@ -601,7 +678,7 @@ class Dashboard(CTkFrame):
         else:
             precision = TP / (TP + FP) if (TP + FP) > 0 else 0 # Check for ZeroDivisionError
 
-        print('Precision = ', precision,'\nRecall')
+        print('Precision = ', precision,'\nRecall =', recall)
 
         self.precision_text.insert('1.0', precision)
         self.recall_text.insert('1.0', recall)
@@ -683,15 +760,13 @@ class Dashboard(CTkFrame):
 
     def update_map_plot(self):
         print('Update_plot run')
-                          
+                        
         if hasattr(self, 'converted_coordinates'):
             print('Coordinates already exist:', self.north_west_point, self.south_east_point)
         else:    
             self.generate_coordinates()
             print('Generated coordindates:', self.north_west_point, self.south_east_point)
         
-        print(self.switch_var.get())
-                   
         if self.switch_var.get() == "Processed":
             if self.species_map_dropdown.get() == "Load data above":
                 messagebox.showerror("Error", "Please load data in *Performance* section")
@@ -700,93 +775,18 @@ class Dashboard(CTkFrame):
                 if self.map_widget:
                     self.map_widget.destroy()
                     print('Removing map_widget')
-                
-                # Construct bounding box
-                minx, miny = self.south_east_point
-                maxx, maxy = self.north_west_point
-                bbox = (minx, maxy, maxx, miny)  # Overpass API uses (lat, lon) order
-                print(bbox)
-
-                # Use Overpass API to get country names that intersect the bounding box
-                overpass_url = "http://overpass-api.de/api/interpreter"
-                overpass_query = f"""
-                [out:json];
-                (
-                relation["boundary"="administrative"]["admin_level"="2"]{bbox};
-                );
-                out body;
-                >;
-                out skel qt;
-                """
-                response = requests.get(overpass_url, params={'data': overpass_query})
-
-                if response.status_code == 200:
-                    # Successful request
-                    data = response.json()
-                elif response.status_code == 400:
-                    # Bad request
-                    print("Bad Request: ", response.text)
-                else:
-                    # Other error
-                    print(f"HTTP {response.status_code}: ", response.text)
-
-
-                countries = set()
-                for element in data['elements']:
-                    if element['type'] == 'relation':
-                        for tag in element['tags']:
-                            if tag == 'name:en':
-                                countries.add(element['tags'][tag])
-
-                print(countries)
 
                 # Create the map figure and axis
                 fig = Figure(figsize=(5, 5), dpi=100)  # Adjust figure size as needed
                 ax = fig.add_subplot(111)
                 ax.set_aspect('equal')
 
-                with open('./country_codes.txt', 'r') as f:
-                    COUNTRY_CODES = json.load(f)
+                # Define the map
+                min_lon, min_lat = self.south_east_point  # Lower left corner coordinates
+                max_lon, max_lat = self.north_west_point  # Upper right corner coordinates
 
-                # Plot the base map
-                tif_files = []
-                for country in countries:
-                    if country in COUNTRY_CODES:
-                        tif_files.append(f'./country_geo/{COUNTRY_CODES[country]}_lc.tif')
-
-                bbox_polygon = {
-                    'type': 'Polygon',
-                    'coordinates': [[
-                        [minx, miny],
-                        [minx, maxy],
-                        [maxx, maxy],
-                        [maxx, miny],
-                        [minx, miny]
-                    ]]
-                }
-
-                # Open and crop the raster data for each country
-                for tif_file in tif_files:
-                    # Open the raster file
-                    with rasterio.open(tif_file) as src:
-                        # Transform the bounding box to the same CRS as the raster
-                        bbox_transformed = rasterio.warp.transform_bounds(src.crs, {'init': 'epsg:4326'}, *bbox)
-                        # Check if the bounding box intersects the raster
-                        if not rasterio.coords.disjoint_bounds(bbox_transformed, src.bounds):
-                            # The bounding box intersects the raster
-                            out_image, out_transform = rasterio.mask.mask(src, [bbox_polygon], crop=True)
-                            out_meta = src.meta
-                        else:
-                            # The bounding box does not intersect the raster
-                            print('The bounding box does not intersect the raster.')
-
-                    out_meta.update({"driver": "GTiff",
-                                    "height": out_image.shape[1],
-                                    "width": out_image.shape[2],
-                                    "transform": out_transform})
-
-                    # Plot the cropped raster data
-                    ax.imshow(out_image[0], cmap='viridis', aspect='auto')
+                m = Basemap(llcrnrlon=min_lon, llcrnrlat=min_lat, urcrnrlon=max_lon, urcrnrlat=max_lat, epsg=4326)
+                m.arcgisimage(service='ESRI_Imagery_World_2D', xpixels = 1500, verbose= True)
 
                 # Filter data by species and compute point sizes
                 filtered_data = self.data_source[self.data_source['common_name'] == self.species_var.get()]
@@ -794,7 +794,8 @@ class Dashboard(CTkFrame):
 
                 # Plot points for each site
                 for site, size in zip(self.converted_coordinates, sizes):
-                    ax.plot(*site, 'o', color='black', markersize=size)
+                    x, y = m(*site)  # Convert lat/lon to map projection coords
+                    m.plot(x, y, 'o', color='black', markersize=size)
 
                 # Set title and display the map
                 ax.set_title(self.species_var.get())
@@ -805,8 +806,8 @@ class Dashboard(CTkFrame):
 
                 # Get the widget from the canvas and grid it into the parent widget
                 self.canvas_widget = canvas.get_tk_widget()
-                self.canvas_widget.grid(row=1, column=0, padx=(5, 5), pady=(5, 5), columnspan=6, rowspan=4, sticky="nsew")   
-            
+                self.canvas_widget.grid(row=1, column=0, padx=(5, 5), pady=(5, 5), columnspan=6, rowspan=4, sticky="nsew")  
+                
         elif self.switch_var.get() == "Raw":
             
             # Clear existing markers from the map
@@ -896,6 +897,7 @@ class Dashboard(CTkFrame):
             self.controller.load_project_settings(os.path.basename(file_name_without_extension))         
 
 class Detect_ModelPage(CTkScrollableFrame):
+        
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
@@ -949,110 +951,7 @@ class Detect_ModelPage(CTkScrollableFrame):
             self.min_confid_text.configure(state="disabled")
         else:
             self.min_confid_text.configure(state="normal")
-
-            
-    def preprocess_audio(self, audio_file):
-        # Load the audio file using librosa
-        audio, sr = librosa.load(audio_file, sr=22050)
-
-        # Calculate the duration of the audio in samples
-        duration_samples = len(audio)
-
-        # Set the desired segment length (1 second)
-        segment_length_samples = sr
-
-        # Initialize an empty list to store the segments
-        segments = []
-
-        # Iterate over the audio and create 1-second segments
-        for start_sample in range(0, duration_samples, segment_length_samples):
-            end_sample = start_sample + segment_length_samples
-
-            # Extract the segment from the audio
-            segment = audio[start_sample:end_sample]
-
-            # Convert the segment to a melspectrogram
-            segment_melspectrogram = self.audio_to_melspectrogram(segment, sr)
-
-            # Append the melspectrogram segment to the list
-            segments.append(segment_melspectrogram)
-
-        return np.array(segments)
-
-    def audio_to_melspectrogram(self, audio, sr):
-
-        # create spectrogram
-        S = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=1024, hop_length=256,
-                                        n_mels=128, fmin=500, fmax=9000)
-
-        image = librosa.core.power_to_db(S)
-        image_np = np.asmatrix(image)
-        image_np_scaled_temp = (image_np - np.min(image_np))
-        image_np_scaled = image_np_scaled_temp / np.max(image_np_scaled_temp)
-        mean = image.flatten().mean()
-        std = image.flatten().std()
-        eps = 1e-8
-        spec_norm = (image - mean) / (std + eps)
-        spec_min, spec_max = spec_norm.min(), spec_norm.max()
-        spec_scaled = (spec_norm - spec_min) / (spec_max - spec_min)
-        S1 = spec_scaled
-
-        # 3 different input
-        return np.stack([S1, S1**3, S1**5], axis=2)
-
-    def process_predictions(self, predictions, audio_file):
-        # Get the class labels
-        class_labels = ['No', 'GGM', 'SCM']
-        
-        # Get the class with the highest probability for each segment
-        pred_classes = np.argmax(predictions, axis=1)
-
-        # Convert the class indices to their corresponding labels
-        pred_labels = [class_labels[i] for i in pred_classes]
-
-        # Initialize the result DataFrame
-        result = pd.DataFrame(columns=['sound.files','start_time', 'end_time', 'class'])
-
-        # Loop through the segments and process the predictions
-        i = 0
-        while i < len(pred_labels):
-            if pred_labels[i] != 'No':
-                start_time = i
-                end_time = i + 1
-                current_class = pred_labels[i]
-
-                # Combine adjacent segments of the same class
-                while (i + 1 < len(pred_labels)) and (pred_labels[i + 1] == current_class):
-                    end_time += 1
-                    i += 1
-
-                # Add the combined segments to the result DataFrame
-                new_row = pd.DataFrame({'sound.files': [audio_file], 'start_time': [start_time], 'end_time': [end_time], 'class': [current_class]})
-                result = pd.concat([result, new_row], ignore_index=True)
-            i += 1
-
-        return result
-
-    
-    def run_custom(self, audio_file, model):
-        # Preprocess the audio file and run it through the model
-        # This will depend on how your model is designed
-        # Make sure to adapt this function to your specific use case
-
-        # For example:
-        processed_audio = self.preprocess_audio(audio_file)
-        predictions = model.predict(processed_audio)
-        
-        # Process the model predictions and return the result
-        result = self.process_predictions(predictions, audio_file)
-        return result
-    
-    def load_model(self):
-        # Load your TensorFlow model here
-        print(self.controller.model_selected)
-        model = tf.keras.models.load_model(self.controller.model_selected)
-        return model
-    
+                  
     def extract_site_name(self, file):
         file_base = os.path.basename(file)
         
@@ -1063,11 +962,6 @@ class Detect_ModelPage(CTkScrollableFrame):
 
     def run_model(self):
         print('Run model')
-        # Load your TensorFlow model here
-        self.model = self.load_model()
-
-        # Create an empty DataFrame to store the results
-        combined_results = pd.DataFrame()
 
         directory_path = self.controller.data_location
         
@@ -1075,22 +969,23 @@ class Detect_ModelPage(CTkScrollableFrame):
             data = [file for file in os.listdir(directory_path) if file.endswith('.WAV')]
             data_paths = [os.path.join(directory_path, file) for file in data]         
             if self.test_option.get() == "Yes":
-                results = self.popup_model(data_paths[0:10], combined_results)
+                results = self.popup_model(random.sample(data_paths,10))
             else:
-                results = self.popup_model(data_paths, combined_results)
+                results = self.popup_model(data_paths)
         
         elif self.controller.name_convention == "(datetime)":
+            results_df = pd.DataFrame()
             items = os.listdir(directory_path)
             site_files = [item for item in items if os.path.isdir(os.path.join(directory_path, item))]
             for site in site_files:
                 data = [file for file in os.listdir(site) if file.endswith('.WAV')]
                 data_paths = [os.path.join(directory_path, site, file) for file in data]
                 if self.test_option.get() == "Yes":
-                    results_site = self.popup_model(data_paths[0:10], combined_results)
+                    results_site = self.popup_model(data_paths[0:10])
                 else:
-                    results_site = self.popup_model(data_paths, combined_results)
+                    results_site = self.popup_model(data_paths)
                 
-                results = pd.concat([combined_results, results_site], axis=0, ignore_index=True)
+                results = pd.concat([results_df, results_site], axis=0, ignore_index=True)
         else:
             print('Error creating file paths')
         
@@ -1119,25 +1014,17 @@ class Detect_ModelPage(CTkScrollableFrame):
 
         return results
     
-    def popup_model(self, data_paths, df):
+    def popup_model(self, data_paths):
         popup = ModelProgressPopup(self, self, len(data_paths))
-        for index, wav_file in enumerate(data_paths, start=1):
-            result = self.custom_analyse_file(popup, index, wav_file, df)     
-                
-            # Append the result DataFrame to the combined_results DataFrame
-            combined_results = pd.concat([df, result], axis=0, ignore_index=True)
-        
+
+        custom_extractor = makePredictions(self.controller.model_selected, popup)
+
+        result = custom_extractor.custom_extractor(data_paths) #this is where we put the new class from GGM_recogniser     
+                       
         # Close the popup window
         popup.destroy()   
         
-        return combined_results
-
-    def custom_analyse_file(self, popup, index, wav_file, df):
-        popup.update_progress(index, wav_file)
-        results = self.run_custom(wav_file, self.model)
-        combined_results = pd.concat([df, results], axis=0, ignore_index=True)
-        
-        return combined_results  
+        return result
     
     def birdnet(self, site, audio_file, lat, long, year, month, day, time, min_conf):
         # Load and initialize the BirdNET-Analyzer models.
@@ -1175,10 +1062,8 @@ class Detect_ModelPage(CTkScrollableFrame):
     def get_recording_info(self, wav_file):
         meta_data = self.controller.meta_data
         site_data = self.controller.site_recording_data 
-
         # get the row for the date / site
         file_row = site_data.loc[site_data['file_name'] == os.path.basename(wav_file)]
-        print(file_row)
         
         # get the date requirements
         date = file_row['date_time'].values[0] # get the date 
@@ -1191,17 +1076,26 @@ class Detect_ModelPage(CTkScrollableFrame):
         year = date_object.year
         month = date_object.month
         day = date_object.day
-        time = date_object.time 
+        time = date_object.time() 
         
         site = file_row['site'].values[0] # get the site
 
-        # get the row for the coordinates
         meta_row = meta_data.loc[meta_data['site'] == site]
-        print(meta_row)
-        
-        lat =  meta_row['lat'].values[0] # get the lat
-        long =  meta_row['long'].values[0] # get the long
 
+        if meta_row.empty:
+            print("Site not found, defaulting to the first row.")
+            meta_row = meta_data.iloc[0]
+        else:
+            print("Site found.")
+            meta_row = meta_row.iloc[0]
+
+        print(meta_row)
+        if not meta_row.empty:
+            lat =  meta_row['lat'] # get the lat
+            long =  meta_row['long'] # get the long
+        else:
+            print("meta_row DataFrame is empty.")
+        
         # transform from current EPSG to 4326
         transformer = Transformer.from_crs(self.controller.EPSG_code, "EPSG:4326")
         lat_converted, long_converted  = transformer.transform(long, lat)
@@ -1210,28 +1104,34 @@ class Detect_ModelPage(CTkScrollableFrame):
 
         return site, lat_converted, long_converted, year, month, day, time
     
-    def birdnet_analyse_file(self, popup, index, wav_file, df):
+    def birdnet_analyse_file(self, popup, index, wav_file):
         popup.update_progress(index, wav_file)   
         site, lat, long, year, month, day, time = self.get_recording_info(wav_file)
         results = self.birdnet(site, wav_file, lat, long, year, month, day, time, float(self.min_confid_text.get()))
-        combined_results = pd.concat([df, results], axis=0, ignore_index=True) 
 
-        return  combined_results   
+        return  results   
     
     def make_detections(self, data_paths):
         combined_results = pd.DataFrame()
 
         if self.test_option.get() == "Yes":
             popup = ModelProgressPopup(self, self, len(data_paths[0:10]))
-            for index, wav_file in enumerate(data_paths[0:10], start=1):
-                combined_results = self.birdnet_analyse_file(popup, index, wav_file, combined_results)             
+            popup.update() 
+            for index, wav_file in enumerate(data_paths[0:10]):
+                results = self.birdnet_analyse_file(popup, index, wav_file)
+                print(results)
+                combined_results = pd.concat([combined_results, results], axis=0, ignore_index=True)             
         else: 
             popup = ModelProgressPopup(self, self, len(data_paths))
-            for index, wav_file in enumerate(data_paths, start=1):
-                combined_results = self.birdnet_analyse_file(popup, index, wav_file, combined_results)
+            popup.update() 
+            for index, wav_file in enumerate(data_paths):
+                results = self.birdnet_analyse_file(popup, index, wav_file)
+                print(results)
+                combined_results = pd.concat([combined_results, results], axis=0, ignore_index=True)  
 
         popup.destroy()
         return combined_results 
+
 
     def run_birdnet(self):
         directory_path = self.controller.data_location
@@ -1242,14 +1142,16 @@ class Detect_ModelPage(CTkScrollableFrame):
             all_detections = self.make_detections(data_paths)
 
         elif self.controller.name_convention == "(datetime)":
-            holding_df = pd.DataFrame()
+            all_detections = pd.DataFrame()
             items = os.listdir(directory_path)
             folders = [item for item in items if os.path.isdir(os.path.join(directory_path, item))]
             for site in folders:
-                data = [file for file in os.listdir(site) if file.endswith('.WAV')]
+                print(os.path.join(directory_path, site))
+                data = [file for file in os.listdir(os.path.join(directory_path, site)) if file.endswith('.WAV')]
                 data_paths = [os.path.join(directory_path, site, file).replace("\\", "/") for file in data]
                 detections = self.make_detections(data_paths)
-                all_detections = pd.concat([holding_df, detections], axis=0, ignore_index=True)
+                print(detections)
+                all_detections = pd.concat([all_detections, detections], axis=0, ignore_index=True)
         else:
             print('Error creating file paths') 
         
@@ -1304,9 +1206,11 @@ class ModelProgressPopup(CTkToplevel):
 
         self.title("Processing Files")
         self.attributes('-topmost', True)
-
+        
+        message = f"Launching model..."
         self.message_label = CTkLabel(self)
         self.message_label.grid(row=0, column=0, columnspan = 3, padx = 5, pady = 5, sticky="nsew")
+        self.message_label.configure(text=message)
         
         self.progress_bar = ttk.Progressbar(self, length=200)
         self.progress_bar.grid(row=0, column=3, padx = 5, pady = 5, sticky="nsew")
@@ -1314,10 +1218,8 @@ class ModelProgressPopup(CTkToplevel):
 
         self.counter_label = CTkLabel(self)      
         self.counter_label.grid(row=0, column=4, padx = 5, pady = 5, sticky="nsew")
-       
-        message = f"Launching model..."
+        
         counter = f"0/{self.total_files}"
-        self.message_label.configure(text=message)
         self.counter_label.configure(text=counter)
         self.update_idletasks()
         self.update()
@@ -1396,8 +1298,10 @@ class ValidatePage(CTkFrame):
     def get_data(self):
         self.file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
         self.df = pd.read_csv(f'{self.file_path}')
-
-        self.unique_values = self.df['common_name'].unique().tolist()
+        
+        column_to_check = 'common_name' if 'common_name' in self.df.columns else 'pred_class' if 'pred_class' in self.df.columns else None
+        
+        self.unique_values = self.df[column_to_check].unique().tolist()
         self.dropdown.destroy()
 
         self.species_var = StringVar(value=self.unique_values[0])
@@ -1413,33 +1317,59 @@ class ValidatePage(CTkFrame):
         self.metric_var.set(value)
 
     def load_audio(self):
-        if 'ManVal' not in self.df.columns:
-            self.df['ManVal'] = ''
+        # Check if the folder exists
+        path = Path(self.controller.data_location)
+        if not path.exists() or not path.is_dir():
+            print(self.controller.data_location)
+            messagebox.showerror("Error", f"The directory {self.controller.data_location} cannot be found")
+            print('Cannot find audio location')
+            return
+        else:
+            print(self.controller.data_location, 'has been located')
+            if 'ManVal' not in self.df.columns:
+                self.df['ManVal'] = ''
 
-        if self.metric_var.get() == "Precision":
-            # filter the dataframe for rows where 'common_name' matches the current species
-            self.df_filtered = self.df[self.df['common_name'] == self.species_var.get()]
-                
-        elif self.metric_var.get() == "Recall":
-            # get start times where 'common_name' is equal to species_var.get()
-            same_species_start_times = self.df[self.df['common_name'] == self.species_var.get()]['start_time']
-            
-            # filter for rows where 'common_name' is not the current species and start_time is not in same_species_start_times
-            self.df_filtered = self.df[(~self.df['start_time'].isin(same_species_start_times)) & (self.df['common_name'] != self.species_var.get())]
-            
-            # Remove any duplicate rows based on start_time and end_time
-            self.df_filtered = self.df_filtered.drop_duplicates(subset=['start_time', 'end_time'])
-            
-            # If df_filtered has more than 2000 rows, sample 2000 rows. Otherwise, use all rows.
-            if len(self.df_filtered) > 2000:
-                self.df_filtered = self.df_filtered.sample(n=2000, random_state=1)
+            column_to_check = 'common_name' if 'common_name' in self.df.columns else 'pred_class' if 'pred_class' in self.df.columns else None
+
+            if column_to_check is None:
+                print("Error: Neither 'common_name' nor 'pred_class' is available.")
+                return
+
+            if self.metric_var.get() == "Precision":
+                # filter the dataframe for rows where 'common_name' or 'pred_class' matches the current species
+                self.df_filtered = self.df[self.df[column_to_check] == self.species_var.get()]
+
+            elif self.metric_var.get() == "Recall":
+                # Select all rows where 'common_name' or 'pred_class' is not equal to species_var.get()
+                self.df_filtered = self.df[self.df[column_to_check] != self.species_var.get()]
+
+                # Group by 'soundfile' and remove duplicate rows based on 'start_time' and 'end_time'
+                self.df_filtered = self.df_filtered.groupby('soundfile').apply(lambda x: x.drop_duplicates(subset=['start_time', 'end_time'])).reset_index(drop=True)
+
+                # If df_filtered has less than 2000 rows, sample randomly up to 2000 rows with replacement. Otherwise, use all rows.
+                if len(self.df_filtered) < 2000:
+                    self.df_filtered = self.df_filtered.sample(n=2000, replace=True, random_state=1)
+                # If the number of rows is already above 2000, leave the dataframe as it is
+                else:
+                    self.df_filtered = self.df_filtered
 
             if self.species_var.get() not in self.df.columns:
                 self.df[self.species_var.get()] = ''
-                print(self.species_var.get())
+                print('Focal species:', self.species_var.get())
 
-        # find the row index
-        self.valid_rows = self.df_filtered.index.tolist()
+        # Find the first row that 'ManVal' is not 'correct' or 'incorrect' in df_filtered
+        start_index = (~self.df_filtered['ManVal'].isin(['correct', 'incorrect'])).idxmax()
+
+        # If the start_index is in df_filtered, use it as the starting point
+        if start_index in self.df_filtered.index:
+            # Find the position of start_index in df_filtered index
+            start_pos = self.df_filtered.index.tolist().index(start_index)
+            # Start from the row with start_index
+            self.valid_rows = self.df_filtered.index[start_pos:].tolist()
+        # If all 'ManVal' are 'correct' or 'incorrect' in df_filtered, start from the first row of df_filtered
+        else:
+            self.valid_rows = self.df_filtered.index.tolist()
+
         print(self.valid_rows)
 
         self.current_row_index = self.valid_rows[0]
@@ -1448,7 +1378,6 @@ class ValidatePage(CTkFrame):
         self.play_button["state"] = "normal"
         self.load_audio_from_current_row()
 
- 
     def load_audio_from_current_row(self):
         print('Load row ', self.current_row_index)
         row = self.df.loc[self.current_row_index]
@@ -1459,42 +1388,52 @@ class ValidatePage(CTkFrame):
         self.end = row['end_time']
         length =  round(self.end - self.start, 0)
         middle = self.start + (length / 2)
-        label = row['common_name']
+        
+        if 'common_name' in row and pd.notnull(row['common_name']):
+            label = row['common_name']
+        elif 'pred_class' in row and pd.notnull(row['pred_class']):
+            label = row['pred_class']
+        else:
+            print("Error: Neither 'common_name' nor 'pred_class' is available.")
+            label = None  # Or set to a default value, if you prefer
+        
         self.status = row['ManVal']
         self.recall_status = row[self.species_var.get()]
-        
+
         # ensure we are not loading a whole new sound file when we don't need to as we are loading full files to enable the playback
         try:
-            self.audio_file_name
+            if 'sound.files' in row:
+                self.audio_file_name = row['sound.files']
+                pygame.mixer.music.load(f'{self.audio_file_name}')
+            elif 'sound.file' in row:
+                self.audio_file_name = row['sound.file']
+                pygame.mixer.music.load(f'{self.audio_file_name}')
+            else:
+                raise KeyError('Neither "sound.files" nor "sound.file" found in row.')
         except:
-            self.audio_file_name = os.path.basename(row['sound.file'])
-            pygame.mixer.music.load(f'{self.controller.data_location}/{self.audio_file_name}')
+            self.audio_file_name = row['sound.file']
+            pygame.mixer.music.load(f'{self.audio_file_name}')
             # Load audio file
             print('Loading new sound file')
-        else:
-            if os.path.basename(row['sound.file']) != self.audio_file_name:
-                self.audio_file_name = os.path.basename(row['sound.file'])
-                pygame.mixer.music.load(f'{self.controller.data_location}/{self.audio_file_name}')
-                # Load audio file
-                print('Loading new sound file')
-            else:
-                print('Using the existing sound files for playback')
 
         if length > 1:
             self.new_start = middle - 2.5
-            self.audio, self.sr = librosa.load(f'{self.controller.data_location}/{self.audio_file_name}', offset = self.new_start, duration = 5)
+            self.audio, self.sr = librosa.load(f'{self.audio_file_name}', offset = self.new_start, duration = 5)
             self.visualize_audio(1, 4, label)
         else: 
-            self.audio, self.sr = librosa.load(f'{self.controller.data_location}/{self.audio_file_name}', offset = self.new_start, duration = 5)
+            self.audio, self.sr = librosa.load(f'{self.audio_file_name}', offset = self.new_start, duration = 5)
             self.visualize_audio(2, 3, label)
 
     def mark_correct(self):
         print('Mark correct')
         if self.metric_var.get() == 'Precision':
+            print('Adding correct to row', self.current_row_index)
             self.df.loc[self.current_row_index, "ManVal"] = "correct"
         elif self.metric_var.get() == 'Recall':
             self.df.loc[self.current_row_index, self.species_var.get()] = "correct"
+            print('Adding correct to', self.species_var.get(),'row', self.current_row_index)
 
+        self.save_df_to_csv()
         self.next_row()
         self.update_idletasks()  # force Tkinter to process any pending tasks
 
@@ -1502,11 +1441,14 @@ class ValidatePage(CTkFrame):
         print('Mark incorrect')       
         if self.metric_var.get() == 'Precision':
             self.df.loc[self.current_row_index, "ManVal"] = "incorrect"
+            print('Adding incorrect to row', self.current_row_index)
         elif self.metric_var.get() == 'Recall':
             self.df.loc[self.current_row_index, self.species_var.get()] = "incorrect"
-
+        
+        self.save_df_to_csv()
         self.next_row()
         self.update_idletasks()  # force Tkinter to process any pending tasks
+
 
     def next_row(self):
         try:
@@ -1570,10 +1512,23 @@ class ValidatePage(CTkFrame):
                 self.after(100, self.update_pos)  # schedule another update after 100 ms
 
     def play(self):
+        print('Start Playing')
         if not self.is_playing:
-            pygame.mixer.music.play(start = self.new_start)
+            print('Playing')
+            try:
+                pygame.mixer.music.play(start = self.new_start)
+                print('Pygame play method executed successfully')
+            except Exception as e:
+                print('An error occurred in pygame play method: ', e)
+
             self.is_playing = True
-            self.start_animation()
+
+            try:
+                self.start_animation()
+                print('start_animation method executed successfully')
+            except Exception as e:
+                print('An error occurred in start_animation method: ', e)
+            
             self.after(100, self.update_pos)  # schedule the first update
 
     def update_animation_line(self, i):
@@ -1585,11 +1540,31 @@ class ValidatePage(CTkFrame):
         return [self.animation_line]
 
     def start_animation(self):
+        print('Starting animation')
         # check if the animation is defined
         if self.anim is not None:
             self.anim.event_source.start()
 
     def visualize_audio(self, start, end, label):
+        # Close all existing figures
+        plt.close('all')
+
+        # Check if the spectrogram_canvas exists and clear it
+        if self.spectrogram_canvas is not None:
+            plt.clf()
+            self.spectrogram_canvas.get_tk_widget().destroy()
+
+        # Get current system-wide memory usage
+        mem_info = psutil.virtual_memory()
+
+        # Convert bytes to MB
+        available_memory_in_MB = mem_info.available / (1024 ** 2)
+
+        # Check if available memory is less than 1 MB
+        if available_memory_in_MB < 1:
+            # If it is, show a popup message
+            messagebox.showwarning("Warning", "Available memory is less than 1MB - Please restart the app")
+        
         # Compute the melspectrogram of the audio
         melspectrogram = librosa.feature.melspectrogram(y=self.audio, sr = self.sr)
 
@@ -1626,9 +1601,12 @@ class ValidatePage(CTkFrame):
         self.spectrogram_canvas.get_tk_widget().pack(side='top', fill='both', expand=True)
 
     def save_df_to_csv(self):
-        self.df.update(self.df_filtered)
-        self.df.to_csv(self.file_path, index=False)
-        print('File saved')
+        try:
+            self.df.to_csv(self.file_path, index=False)
+            print('File saved')
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
 
     def dashboard_button_event(self):
             print("sidebar_button click")
@@ -1685,6 +1663,8 @@ class MainApplication(CTk):
         self.timezone = ""
         self.detections = None
         self.combined_results = None
+        self.countries = ''
+        self.standard_bbox = ''
  
         self.frames = {}
         for F in (LandingPage, Dashboard, ValidatePage):
@@ -1745,14 +1725,26 @@ class MainApplication(CTk):
         if date_convention == "AudioMoth - legacy":
                 # Convert the hexadecimal datetime to a standard datetime object
                 hex_timestamp, ext = os.path.splitext(date)
-                timestamp = int(hex_timestamp, 16)
-                formatted_dt = datetime.fromtimestamp(timestamp)
+                print('Hexstamp:', hex_timestamp)
+                try:
+                    timestamp = int(hex_timestamp, 16)
+                    formatted_dt = datetime.fromtimestamp(timestamp)
+                except ValueError:
+                    print(f"Unable to convert hex timestamp: {hex_timestamp}")
+                    # Handle the error appropriately, perhaps by setting a default datetime value, returning, or raising the exception
 
         elif date_convention == "AudioMoth - standard":
-                formatted_dt = datetime.utcfromtimestamp(date)
-        
+                # Convert the hexadecimal datetime to a standard datetime object
+                date_object, ext = os.path.splitext(date)
+                print('Hexstamp:', date_object)
+                try:
+                    formatted_dt = datetime.strptime(date_object, "%Y%m%d_%H%M%S")
+                except ValueError:
+                    print(f"Unable to convert hex timestamp: {date_object}")
+                    # Handle the error appropriately
         else: 
             print('Naming convention not found')
+
 
         # Apply the timezone to the datetime object
         timezone = pytz.timezone(self.timezone)
@@ -1760,16 +1752,20 @@ class MainApplication(CTk):
         
         return local_dt
 
-    def get_wav_duration(self, file_path, data_location):
+    def get_wav_duration(self, file_path, data_location, name_convention):
         try:
             # create the full file path of the audio
-            audio_file = os.path.join(data_location, file_path)
+            if name_convention == "(datetime)":
+                audio_file = os.path.join(data_location, self.site, file_path)
+            else:
+                audio_file = os.path.join(data_location, file_path)
+            print('Searching for', audio_file)
 
             with audioread.audio_open(audio_file) as audio_file:
                 duration = audio_file.duration
                 return duration
         except Exception as e:
-            print(f"Error processing file '{file_path}': {e}")
+            print(f"Cannot calculate length of '{file_path}': {e}")
             return 0  # Return 0 as the duration in case of an error
         
     def read_extract_datetime(self, data_location, name_convention, date_convention):
@@ -1780,20 +1776,20 @@ class MainApplication(CTk):
         new_rows = []
         total_files = 0
 
-        all_files = [file for file in os.listdir(directory_path)]
-        print(len(all_files), 'files in', directory_path)
-
         if name_convention == "(site)_(datetime)":
             files = [file for file in os.listdir(directory_path) if file.endswith('.WAV')]
+            print(len(files), 'files in', directory_path)
             total_files = len(files)
             print('Found', total_files, 'audio files')                              
 
         elif name_convention == "(datetime)":
             items = os.listdir(directory_path)
+            print(len(items), 'sites folders', directory_path)
             folders = [item for item in items if os.path.isdir(os.path.join(directory_path, item))]
             for site in folders:
-                total_files += len([file for file in os.listdir(site) if file.endswith('.WAV')])
-                print('Found', total_files, 'audio files')           
+                print('Working on site:', site)
+                total_files += len([file for file in os.listdir(os.path.join(directory_path, site)) if file.endswith('.WAV')])
+                print('Found', total_files, 'in', site, 'folder')           
         
         else:
             print('Naming convention not found')
@@ -1813,10 +1809,12 @@ class MainApplication(CTk):
                 site_name, hex_datetime = file.split('_')
 
                 # get the date
+                print('Extracting datetime from:', hex_datetime) 
                 date_time = self.extract_datetime(hex_datetime, date_convention)
 
                 # get file duration
-                file_duration = self.get_wav_duration(file, data_location)
+                print('Get file duration')
+                file_duration = self.get_wav_duration(file, directory_path, name_convention)
 
                 # Append the information to the new_rows list
                 end_time = date_time + timedelta(seconds=file_duration)
@@ -1837,25 +1835,25 @@ class MainApplication(CTk):
 
         elif name_convention == "(datetime)":
             for site in folders:
-                files = [file for file in os.listdir(site) if file.endswith('.WAV')]
+                self.site = site
+                print('Working on', site)
+                files = [file for file in os.listdir(os.path.join(directory_path, site)) if file.endswith('.WAV')]
 
                 for file in files:
-                    # remove the extention
-                    timestamp = int(file.replace('.WAV', ''), 16)
                     # get the date
-                    date_time = self.extract_datetime(timestamp)
+                    print('Extracting datetime from:', file)   
 
-                    # get site name
-                    site_name = os.path.basename(file)
+                    date_time = self.extract_datetime(file, date_convention)
 
                     # get file duration
-                    file_duration = self.get_wav_duration(file, data_location)
+                    print('Get file duration')
+                    file_duration = self.get_wav_duration(file, directory_path, name_convention)
 
                     # Append the information to the new_rows list
                     end_time = date_time + timedelta(seconds=file_duration)
 
                     new_rows.append({
-                        'site': site_name,
+                        'site': self.site,
                         'date_time': date_time,
                         'date': date_time.date(),
                         'start_time': date_time.time(),
@@ -1926,10 +1924,13 @@ class MainApplication(CTk):
         
         # Save the DataFrame in the project_settings dictionary
         self.project_settings['site_recording_data'] = self.site_recording_data
+        self.project_settings['countries'] = self.countries
+
+        print('Countries:', self.countries)
 
         with open(f'.\{project_name}.pkl', 'wb') as f:
             pickle.dump(self.project_settings, f)
-        
+
         print('Data saved') 
     
     def get_timezone(self):
@@ -1960,13 +1961,16 @@ class MainApplication(CTk):
         self.data_location = self.project_settings['data_location']
         self.site_recording_data = self.project_settings['site_recording_data']  
         self.model_selected = self.project_settings['model']
-    
+        self.countries = self.project_settings['countries']
+
         # Load the meta_data DataFrame from the CSV file
         self.data_folder = f"{project_name}_data"
         meta_data_filepath = os.path.join('.\\', self.data_folder, self.project_settings['meta_data'])
+        print(meta_data_filepath)
 
         try:
             self.meta_data = pd.read_csv(meta_data_filepath)
+            print(self.meta_data)
         except FileNotFoundError as e:
             print(f"Error loading meta_data file: {e}")
             return False
