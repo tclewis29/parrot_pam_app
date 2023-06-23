@@ -1,7 +1,7 @@
 # Parrot PAM app
 The app for your local PAM processing needs
 
-## Setup {#section-1}
+## Setup
 
 ### Create new project
 
